@@ -1,0 +1,187 @@
+# =============================================================================
+# ML-System-Design-Batch-Inference — Docker Compose
+# =============================================================================
+# Services:
+#   postgres  — audit store (customers, predictions, batch_runs, benchmarks)
+#   spark     — PySpark local-mode inference engine
+#   airflow   — DAG scheduler (LocalExecutor, single container)
+#   api       — FastAPI score-serving layer
+#   gradio    — 4-tab monitoring dashboard
+#
+# Quick start:
+#   docker-compose up --build
+#   # Then open:
+#   #   Airflow UI:   http://localhost:8081  (admin / admin)
+#   #   FastAPI docs: http://localhost:8000/docs
+#   #   Gradio:       http://localhost:7860
+#   #   Spark UI:     http://localhost:4040  (only while Spark job runs)
+#
+# To trigger the full pipeline manually:
+#   docker-compose exec airflow airflow dags trigger nightly_batch_inference
+# =============================================================================
+
+version: "3.9"
+
+x-common-env: &common-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: batch_inference
+  POSTGRES_USER: batch_user
+  POSTGRES_PASSWORD: batch_pass
+  SPARK_MASTER: "local[*]"
+  API_BASE_URL: "http://api:8000"
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: batch_postgres
+    environment:
+      POSTGRES_DB: batch_inference
+      POSTGRES_USER: batch_user
+      POSTGRES_PASSWORD: batch_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U batch_user -d batch_inference"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Apache Spark (bitnami/spark runs in local mode — no worker needed)
+  # The Spark UI is available at http://localhost:4040 while a job runs.
+  # ---------------------------------------------------------------------------
+  spark:
+    image: bitnami/spark:3.5
+    container_name: batch_spark
+    environment:
+      <<: *common-env
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "8080:8080"     # Spark Web UI
+      - "4040:4040"     # Spark Application UI (active while job runs)
+      - "7077:7077"     # Spark master port
+    volumes:
+      - ./data:/opt/bitnami/spark/data
+      - ./models:/opt/bitnami/spark/models
+      - ./spark:/opt/bitnami/spark/spark_jobs
+      - ./configs:/opt/bitnami/spark/configs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Apache Airflow 2.9 — LocalExecutor (single container, SQLite metadata DB)
+  # Scheduler + Webserver in one container for local development simplicity.
+  # ---------------------------------------------------------------------------
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: batch_airflow
+    environment:
+      <<: *common-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://batch_user:batch_pass@postgres:5432/batch_inference"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "batch_inference_secret_key_change_in_prod"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
+      # Makes airflow use our postgres for metadata too
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://batch_user:batch_pass@postgres:5432/batch_inference"
+    ports:
+      - "8081:8080"     # Airflow UI (mapped to 8081 — Spark uses 8080)
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./data:/opt/airflow/data
+      - ./models:/opt/airflow/models
+      - ./spark:/opt/airflow/spark
+      - ./benchmark:/opt/airflow/benchmark
+      - ./monitoring:/opt/airflow/monitoring
+      - ./configs:/opt/airflow/configs
+      - ./db:/opt/airflow/db
+      - airflow_logs:/opt/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --password admin
+          --firstname Admin --lastname User --role Admin
+          --email admin@example.com 2>/dev/null || true &&
+        airflow scheduler &
+        airflow webserver
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # FastAPI — score-serving layer
+  # Reads pre-computed scores from PostgreSQL — no model loaded at serve time.
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: batch_api
+    environment:
+      <<: *common-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Gradio — 4-tab monitoring dashboard
+  # ---------------------------------------------------------------------------
+  gradio:
+    build:
+      context: .
+      dockerfile: Dockerfile.gradio
+    container_name: batch_gradio
+    environment:
+      <<: *common-env
+    ports:
+      - "7860:7860"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  airflow_logs:

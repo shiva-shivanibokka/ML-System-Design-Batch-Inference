@@ -1,0 +1,69 @@
+# =============================================================================
+# .gitignore — ML-System-Design-Batch-Inference
+# =============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+
+# Data files (large — regenerate with data/generate_data.py)
+data/customers.parquet
+data/scored_output.parquet
+data/benchmark_chart.png
+data/benchmark_results.json
+data/*.parquet
+data/*.csv
+
+# Trained model artifacts (regenerate with models/train.py)
+models/churn_model.pkl
+models/label_encoders.pkl
+models/feature_columns.pkl
+models/*.pkl
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Docker
+.docker/
+
+# Logs
+logs/
+*.log
+airflow/logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Spark
+derby.log
+metastore_db/
+spark-warehouse/

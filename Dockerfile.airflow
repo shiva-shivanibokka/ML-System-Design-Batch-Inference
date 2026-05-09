@@ -1,0 +1,36 @@
+# =============================================================================
+# Apache Airflow 2.9 — scheduler + webserver in one container
+# Uses LocalExecutor — suitable for single-machine deployment
+# =============================================================================
+FROM apache/airflow:2.9.3-python3.11
+
+USER root
+
+# Java is required for PySpark (Spark runs in a separate service,
+# but Airflow may invoke spark-submit via BashOperator)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    default-jdk-headless \
+    gcc \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+USER airflow
+
+# Install Python dependencies needed by the DAG tasks
+COPY requirements.pipeline.txt /tmp/requirements.pipeline.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.pipeline.txt
+
+# Copy pipeline source into Airflow's working directory
+COPY --chown=airflow:root configs/   /opt/airflow/configs/
+COPY --chown=airflow:root db/        /opt/airflow/db/
+COPY --chown=airflow:root spark/     /opt/airflow/spark/
+COPY --chown=airflow:root models/    /opt/airflow/models/
+COPY --chown=airflow:root benchmark/ /opt/airflow/benchmark/
+COPY --chown=airflow:root monitoring//opt/airflow/monitoring/
+COPY --chown=airflow:root data/      /opt/airflow/data/
+
+EXPOSE 8080

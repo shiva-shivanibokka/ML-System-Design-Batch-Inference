@@ -1,0 +1,157 @@
+# =============================================================================
+# ML-System-Design-Batch-Inference — Master Configuration
+# =============================================================================
+# All tuneable parameters live here. Code reads this via settings.py.
+# Environment variable overrides are supported for Docker network hostnames.
+
+# -----------------------------------------------------------------------------
+# Database
+# -----------------------------------------------------------------------------
+database:
+  host: localhost          # Override: POSTGRES_HOST
+  port: 5432
+  name: batch_inference
+  user: batch_user         # Override: POSTGRES_USER
+  password: batch_pass     # Override: POSTGRES_PASSWORD
+  pool_size: 10
+  max_overflow: 20
+
+# -----------------------------------------------------------------------------
+# Data Generation
+# -----------------------------------------------------------------------------
+data:
+  n_customers: 1_000_000
+  random_seed: 42
+  output_path: data/customers.parquet
+  churn_rate: 0.185          # ~18.5% base churn rate (realistic telecoms/SaaS)
+  # Feature definitions (used by both generator and model)
+  numeric_features:
+    - age
+    - tenure_months
+    - monthly_charges
+    - total_charges
+    - num_products
+    - num_support_calls
+    - avg_session_minutes
+    - days_since_last_login
+    - payment_failures
+    - referrals_given
+  categorical_features:
+    - contract_type          # month-to-month, one-year, two-year
+    - payment_method         # credit_card, bank_transfer, electronic_check, mailed_check
+    - internet_service       # fiber, dsl, none
+    - has_phone_service      # yes, no
+    - has_streaming          # yes, no
+    - has_tech_support       # yes, no
+    - region                 # north, south, east, west, central
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+  path: models/churn_model.pkl
+  version: "v1.0.0"
+  label_encoders_path: models/label_encoders.pkl
+  feature_columns_path: models/feature_columns.pkl
+  # LightGBM hyperparameters
+  lgbm:
+    n_estimators: 500
+    learning_rate: 0.05
+    num_leaves: 63
+    max_depth: -1
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    class_weight: balanced
+    random_state: 42
+    n_jobs: -1
+  # Train/val/test split
+  train_size: 0.7
+  val_size: 0.15
+  test_size: 0.15
+
+# -----------------------------------------------------------------------------
+# PySpark Batch Inference
+# -----------------------------------------------------------------------------
+spark:
+  app_name: "ChurnBatchInference"
+  master: "local[*]"          # local[*] = use all CPU cores; swap for cluster URL
+  executor_memory: "4g"
+  driver_memory: "4g"
+  n_partitions: 50             # repartition before mapPartitions inference
+  input_path: data/customers.parquet
+  output_path: data/scored_output.parquet
+  # Logging
+  log_level: "WARN"            # reduce Spark verbosity
+
+# -----------------------------------------------------------------------------
+# Benchmark
+# -----------------------------------------------------------------------------
+benchmark:
+  sample_sizes:
+    - 10_000
+    - 100_000
+    - 500_000
+    - 1_000_000
+  n_joblib_workers: -1         # -1 = all CPUs
+  joblib_backend: loky
+  results_path: data/benchmark_results.json
+  chart_path: data/benchmark_chart.png
+  # Warm-up run before timing (discarded)
+  warmup_rows: 1_000
+
+# -----------------------------------------------------------------------------
+# Batch Pipeline
+# -----------------------------------------------------------------------------
+pipeline:
+  batch_run_id_prefix: "run"
+  # Score distribution monitoring
+  psi_threshold: 0.2           # PSI > 0.2 = significant distribution shift
+  psi_n_bins: 10
+  # Validation gate — batch is rejected if these checks fail
+  min_records_expected: 900_000
+  max_null_score_pct: 0.001    # less than 0.1% null scores allowed
+  score_range: [0.0, 1.0]
+
+# -----------------------------------------------------------------------------
+# FastAPI
+# -----------------------------------------------------------------------------
+api:
+  host: "0.0.0.0"
+  port: 8000
+  title: "Batch Inference Serving API"
+  version: "1.0.0"
+  # Cache
+  cache_ttl_seconds: 300
+  # Pagination defaults
+  default_page_size: 50
+  max_page_size: 500
+
+# -----------------------------------------------------------------------------
+# Gradio Dashboard
+# -----------------------------------------------------------------------------
+gradio:
+  host: "0.0.0.0"
+  port: 7860
+  title: "Batch Inference Monitor"
+  theme: "soft"
+  # API base URL (resolved inside Docker network)
+  api_base_url: "http://api:8000"   # Override: API_BASE_URL
+
+# -----------------------------------------------------------------------------
+# Airflow
+# -----------------------------------------------------------------------------
+airflow:
+  dag_id: "nightly_batch_inference"
+  schedule: "0 2 * * *"       # 2:00 AM daily
+  catchup: false
+  retries: 2
+  retry_delay_minutes: 5
+  sla_minutes: 120             # alert if DAG hasn't finished within 2 hours
+  email_on_failure: false      # set true + add email in production
+  tags:
+    - ml
+    - batch-inference
+    - churn
