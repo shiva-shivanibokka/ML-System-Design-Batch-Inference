@@ -36,9 +36,8 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd

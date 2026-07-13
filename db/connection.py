@@ -15,7 +15,8 @@ from typing import Generator, AsyncGenerator
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import NullPool
 
 # Settings loaded once at import
 import sys
@@ -62,13 +63,20 @@ def get_sync_session() -> Generator[Session, None, None]:
 # ---------------------------------------------------------------------------
 # Asynchronous engine (used by FastAPI)
 # ---------------------------------------------------------------------------
-_async_engine = create_async_engine(
-    settings.database.async_url,
-    pool_size=settings.database.pool_size,
-    max_overflow=settings.database.max_overflow,
-    pool_pre_ping=True,
-    echo=False,
-)
+# On Vercel (serverless), each invocation is short-lived and Neon's connection
+# pooler manages pooling — so we use NullPool (no pool held between invocations)
+# and disable asyncpg's prepared-statement cache, which PgBouncer transaction
+# mode (Neon's pooled endpoint) does not support. Locally we keep a real pool.
+_async_kwargs: dict = {"pool_pre_ping": True, "echo": False}
+if os.getenv("VERCEL"):
+    _async_kwargs["poolclass"] = NullPool
+    # statement_cache_size=0 for PgBouncer; ssl=require for Neon's TLS-only endpoint.
+    _async_kwargs["connect_args"] = {"statement_cache_size": 0, "ssl": "require"}
+else:
+    _async_kwargs["pool_size"] = settings.database.pool_size
+    _async_kwargs["max_overflow"] = settings.database.max_overflow
+
+_async_engine = create_async_engine(settings.database.async_url, **_async_kwargs)
 
 AsyncSessionLocal = sessionmaker(
     bind=_async_engine,

@@ -1,0 +1,7 @@
+# Dependencies for the Vercel serverless API function ONLY (kept minimal so the
+# function stays well under Vercel's size limit — no pyspark/lightgbm/pandas here).
+fastapi==0.111.0
+sqlalchemy==2.0.30
+asyncpg==0.29.0
+pydantic==2.7.1
+PyYAML==6.0.1

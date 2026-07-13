@@ -1,329 +1,226 @@
-# ML System Design — Batch Inference Pipeline at Scale
+# Batch Inference Pipeline at Scale — Churn Scoring on Real Subscription Data
 
-> **Production-grade nightly batch scoring system** that scores 1,000,000 customers for churn probability using PySpark distributed inference, orchestrated by Apache Airflow, served via FastAPI, and monitored through a Gradio dashboard.
+> Nightly batch ML system that scores ~970K real subscribers for churn using distributed inference, an audit-trailed Postgres store, a serverless API, and a live monitoring dashboard.
 
-Modelled after the architecture used at **Airbnb**, **LinkedIn**, and **DoorDash** for nightly pre-computed ML scoring at scale.
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![Next.js](https://img.shields.io/badge/dashboard-Next.js%2014-black)
+![Tests](https://img.shields.io/badge/tests-pytest-green)
+![Status](https://img.shields.io/badge/status-in%20active%20build-orange)
+
+> **Status:** mid-build. The full pipeline is implemented and unit-tested; training on the real dataset, first cloud deploy, and end-to-end verification are tracked in **[TODO.md](./TODO.md)** and the [Roadmap](#roadmap) below.
 
 ---
+
+## Recruiter TL;DR
+
+- **What it does:** pre-computes churn scores for ~970K real music-streaming subscribers (KKBox dataset) on a schedule, stores every prediction with full lineage, and serves them with sub-lookup latency behind an API + dashboard.
+- **Hardest problem solved:** eliminating **train/serve skew** across three inference engines (LightGBM training, PySpark distributed scoring, and a pandas serverless path) by routing all of them through one shared feature module — and fixing a real Spark model-broadcast bug that silently shipped the model into every task.
+- *(Impact numbers intentionally omitted — the model has not yet been trained on the real data. Metrics will be added once measured, not estimated.)*
+
+---
+
+## Overview / Motivation
+
+Not every ML prediction needs to be computed on demand. Churn risk doesn't change by the second — computing it once nightly and serving it from an indexed database gives millisecond lookups at a fraction of real-time-inference cost. This is the **pre-compute-and-serve** pattern used for nightly member scoring at companies like LinkedIn, Airbnb, and DoorDash.
+
+This project is a portfolio piece demonstrating that pattern end-to-end on a **real** dataset — the [KKBox Churn Prediction Challenge](https://www.kaggle.com/c/kkbox-churn-prediction-challenge) (WSDM Cup 2018): ~970K labelled subscribers with real demographics and transaction histories. It deliberately spans the full production surface: data engineering, distributed compute, orchestration, an audit trail, a serving API, drift monitoring, a real frontend, CI, and a scheduled deploy.
+
+## Features
+
+- **Real-data ETL** — joins KKBox `members` + `transactions` + labels into a customer-level table, aggregating transaction history into churn signal (auto-renew rate, cancellations, plan price, discount, membership expiry) with an explicit **no-leakage cutoff**.
+- **Distributed batch inference** — PySpark `mapInPandas` with a correctly-broadcast LightGBM model (deserialized once per executor, not per row).
+- **A right-sized second engine** — a pandas scorer (`score_batch.py`) for the volumes that run in CI/serverless, where Spark's JVM startup is pure overhead. The engine choice is a documented, benchmark-backed decision, not an accident.
+- **Zero train/serve skew** — one `features.py` module is imported by training, the Spark job, and the pandas scorer; a unit test asserts the training and inference matrices are byte-identical.
+- **Full audit trail** — every score persisted with `run_id`, `model_version`, and `scored_at`; downstream reads the latest score per customer from an indexed view.
+- **5-gate validation** — record count, null rate, score range, non-degenerate distribution, and plausible churn rate; a bad batch is rejected before it reaches the serving table.
+- **PSI drift monitoring** — Population Stability Index (Basel II standard) between consecutive runs, surfaced on the dashboard.
+- **Serverless API + Next.js dashboard** — FastAPI on Vercel serving pre-computed scores; a Next.js + Recharts dashboard for run history, score distribution, benchmark comparison, and customer lookup.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                   Apache Airflow (2:00 AM daily)                 │
-│                                                                   │
-│  t1_validate_inputs ──► t2_run_spark_inference                   │
-│                              ──► t3_validate_scores              │
-│                                      ──► t4_write_to_postgres    │
-│                                              ──► t5_run_benchmark│
-│                                                    ──► t6_update_│
-│                                                        monitoring │
-└──────────────────────────────┬──────────────────────────────────┘
-                                │
-               ┌────────────────▼────────────────┐
-               │       PySpark Batch Engine       │
-               │  customers.parquet (1M rows)     │
-               │  → repartition(50 partitions)    │
-               │  → mapInPandas per partition     │
-               │  → LightGBM inference per shard  │
-               │  → scored_output.parquet         │
-               └────────────────┬────────────────┘
-                                │
-               ┌────────────────▼────────────────┐
-               │           PostgreSQL             │
-               │  customers     (1M rows)         │
-               │  predictions   (audit trail)     │
-               │  batch_runs    (job metadata)    │
-               │  benchmark_results               │
-               └──────────┬──────────────────────┘
-                          │
-          ┌───────────────▼───────────────┐
-          │         FastAPI               │
-          │  GET /score/{customer_id}     │  ← <10ms indexed lookup
-          │  GET /batch-runs              │  ← pipeline history
-          │  GET /benchmark               │  ← 3-way comparison
-          │  POST /scores/bulk            │  ← bulk lookup (500 IDs)
-          └───────────────────────────────┘
-                          │
-          ┌───────────────▼───────────────┐
-          │       Gradio Dashboard        │
-          │  Tab 1: Batch Run History     │
-          │  Tab 2: Score Distribution    │
-          │  Tab 3: Benchmark Comparison  │
-          │  Tab 4: Customer Lookup       │
-          └───────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Offline["Offline — local (your GPU)"]
+        K["KKBox CSVs<br/>members · transactions · labels"] --> B["data/build_dataset.py<br/>ETL + no-leakage cutoff"]
+        B --> P[("customers.parquet<br/>~970K members")]
+        P --> T["models/train.py<br/>LightGBM"]
+        T --> M["model + encoders<br/>+ feature_columns"]
+    end
+
+    F["features.py<br/>ONE shared feature layer"]:::shared
+
+    subgraph Score["Scoring — same logic, right-sized engine"]
+        SP["spark/batch_inference.py<br/>PySpark · cluster scale"]
+        PD["score_batch.py<br/>pandas · serverless/CI scale"]
+    end
+
+    subgraph Orchestrate
+        AF["Airflow DAG<br/>local · 6 tasks"]
+        GH["GitHub Actions<br/>nightly cron"]
+    end
+
+    M --> SP & PD
+    P --> SP & PD
+    F -.-> T & SP & PD
+    AF --> SP
+    GH --> PD
+
+    SP & PD --> DB[("PostgreSQL / Neon<br/>predictions · batch_runs · benchmarks")]
+    PD --> MON["PSI drift monitor"] --> DB
+    DB --> API["FastAPI · serving/app.py<br/>on Vercel"]
+    API --> UI["Next.js dashboard<br/>Vercel + Recharts"]
+
+    classDef shared fill:#4f46e5,color:#fff;
 ```
 
----
+**Why it's shaped this way**
 
-## What Makes This Production-Grade
-
-### 1. PySpark `mapInPandas` with Model Broadcasting
-The core of the system — not a toy loop:
-
-```python
-# Model broadcast to all executors ONCE per partition (not per row)
-broadcast_model = spark.sparkContext.broadcast(model_bytes)
-
-# Partition-level inference — each partition is an independent pandas DataFrame
-scored_df = df.repartition(50).mapInPandas(predict_partition, schema=output_schema)
-```
-
-The LightGBM model is serialized and broadcast to all Spark executors via `SparkContext.broadcast()`. Each executor deserializes it once per partition — not once per row. This is the exact pattern used at LinkedIn for nightly member scoring.
-
-### 2. Full Audit Trail
-Every prediction row is stored with complete provenance:
-
-| Column | Value |
-|---|---|
-| `customer_id` | `CUST-0000-042` |
-| `churn_probability` | `0.7312` |
-| `churn_label` | `True` |
-| `churn_decile` | `8` |
-| `risk_tier` | `high` |
-| `run_id` | `run-20240101-020000-ab12cd34` |
-| `model_version` | `v1.0.0` |
-| `scored_at` | `2024-01-01T02:45:00Z` |
-
-Downstream teams can always query: *"What was this customer's score at 2am on Jan 1st with model v1?"*
-
-### 3. 5-Gate Validation Before Writing
-The pipeline rejects and retries if any validation gate fails:
-1. **Record count** ≥ 900,000 (catches partial Spark job failures)
-2. **Null rate** < 0.1% (catches prediction errors)
-3. **Score range** [0.0, 1.0] (catches model loading errors)
-4. **Non-degenerate distribution** (std > 0.01 — catches constant prediction)
-5. **Plausible churn rate** [5%, 50%] (catches model drift)
-
-### 4. PSI Score Distribution Monitoring
-Population Stability Index (Basel II standard) measures distribution shift between runs:
-
-```
-PSI = Σ (current_% - reference_%) × ln(current_% / reference_%)
-
-< 0.10 → Stable (no action)
-0.10–0.20 → Moderate change (monitor)
-> 0.20 → Significant shift (investigate/retrain)
-```
-
-### 5. 3-Way Benchmark: When Does Each Engine Win?
-
-| Engine | 10K rows | 100K rows | 500K rows | 1M rows |
-|---|---|---|---|---|
-| **pandas** | ~0.1s | ~1.1s | ~5.5s | ~11s |
-| **joblib Parallel** | ~0.9s | ~3.2s | ~14.8s | ~30s |
-| **PySpark** | ~45s | ~52s | ~68s | ~95s |
-
-**Insight**: PySpark breaks even with pandas at ~500K rows. Above 1M records on a cluster (not local mode), PySpark's advantage compounds — it's the only option that scales to 100M+ records.
-
----
+- **Pre-compute, don't infer on request.** Scores are stable over a day, so the API loads *no model* — it reads an indexed Postgres view. Millisecond lookups, ~1/20th the serving cost of live inference.
+- **Two engines, one feature layer.** Spark scales to 100M+ rows on a cluster; at the volumes that run in free CI/serverless, the project's own benchmark shows pandas beats local Spark (no JVM startup tax). Rather than pretend Spark is always right, the deployed path uses the right-sized engine — and both share `features.py`, so they can't diverge.
+- **The scheduler is the cheapest thing that works.** Airflow models the full 6-task DAG for the local/cluster story; the deployed nightly run is a GitHub Actions cron — free, with public run logs as the orchestration artifact.
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Distributed compute | **Apache Spark 3.5** (PySpark, `mapInPandas`) |
-| Orchestration | **Apache Airflow 2.9** (LocalExecutor, 6-task DAG) |
-| ML model | **LightGBM 4.3** (binary churn classifier) |
-| Database | **PostgreSQL 16** (audit trail, indexed views) |
-| API | **FastAPI 0.111** + Uvicorn (async, 2 workers) |
-| Monitoring | **PSI** (Population Stability Index) via scipy |
-| Dashboard | **Gradio 4.36** + Plotly |
-| Data | **Faker** (1M synthetic customers, ~120MB Parquet) |
-| Container | **Docker + docker-compose** (5 services) |
-| Config | **YAML → typed dataclasses** (env var overrides) |
+| Layer | Choice | Why |
+|---|---|---|
+| Distributed compute | **PySpark 3.5** (`mapInPandas`) | partition-level batched inference; broadcast model |
+| Serverless/CI compute | **pandas + LightGBM** | right-sized engine below cluster scale |
+| Model | **LightGBM 4.3** | fast gradient boosting; native NaN handling (no imputation skew) |
+| Orchestration | **Airflow 2.9** (local) · **GitHub Actions** (deployed) | full DAG locally, free cron in the cloud |
+| Database | **PostgreSQL 16** / **Neon** (serverless) | audit trail, indexed views; Neon = free serverless Postgres |
+| API | **FastAPI** + async SQLAlchemy/asyncpg | async serving, OpenAPI docs, serverless-friendly |
+| Dashboard | **Next.js 14 + TypeScript + Recharts** | real frontend on Vercel (replaces the old Gradio app) |
+| Monitoring | **PSI** via NumPy | continuous, trendable drift metric (Basel II) |
+| Config | **YAML → typed dataclasses** | one config, env-var overrides, `DATABASE_URL` support |
 
----
+## Skills Demonstrated
 
-## Quick Start
+- **Data engineering / ETL** — real multi-file join + aggregation with leakage control (`data/build_dataset.py`)
+- **Production ML deployment / MLOps** — serving fully separated from training; shared feature layer; model versioning in the audit trail
+- **Distributed & concurrent systems** — PySpark partitioned inference with model broadcasting; async FastAPI
+- **System design & architecture** — documented engine-selection and pre-compute tradeoffs
+- **Database design** — schema with constraints, indexes, and analytical views (`db/schema.sql`)
+- **RESTful API design** — 9 documented endpoints, Pydantic v2 validation
+- **Observability & monitoring** — structured logging, `/health`, PSI drift detection
+- **Serverless / cloud deployment architecture** — Vercel (API + dashboard) + Neon (configured; first deploy pending)
+- **CI/CD** — GitHub Actions for lint + tests + dashboard build, plus a scheduled nightly job
+- **Automated testing** — pytest suite pinning the train/serve-parity guarantee
+
+## Getting Started
 
 ### Prerequisites
-- Docker Desktop
-- 8GB+ RAM (Spark needs ~4GB)
+- Docker Desktop (for the local full stack), Python 3.11, Node 20 (for the dashboard)
+- A Kaggle account + API token (dataset download)
 
-### 1. Clone and Start
-
+### 1. Configure
 ```bash
-git clone https://github.com/YOUR_USERNAME/ML-System-Design-Batch-Inference
-cd ML-System-Design-Batch-Inference
+cp .env.example .env         # local docker-compose reads this automatically
+```
+
+### 2. Get the data and train the model
+```bash
+# One-time: accept the KKBox competition rules on Kaggle, then create an API token.
+python data/download_kkbox.py          # members_v3 + transactions_v2 + train_v2
+python data/build_dataset.py           # → data/customers.parquet (~970K rows)
+python models/train.py --eval          # trains LightGBM, saves artifacts + report
+```
+
+### 3. Run the pipeline locally
+```bash
+# Full stack (Postgres + Spark + Airflow + API):
 docker-compose up --build
+# Airflow UI  → http://localhost:8081  (admin / admin)
+# FastAPI docs → http://localhost:8000/docs
+
+# …or score directly without Spark (the deployed path):
+python score_batch.py --skip-postgres      # Parquet only, no DB needed
 ```
 
-### 2. Access Services
-
-| Service | URL | Credentials |
-|---|---|---|
-| **Airflow UI** | http://localhost:8081 | admin / admin |
-| **FastAPI docs** | http://localhost:8000/docs | — |
-| **Gradio dashboard** | http://localhost:7860 | — |
-| **Spark UI** | http://localhost:8080 | — |
-| **PostgreSQL** | localhost:5432 | batch_user / batch_pass |
-
-### 3. Prepare Data and Train Model (first time only)
-
+### 4. Run the dashboard
 ```bash
-# Generate 1M synthetic customers
-docker-compose exec airflow python /opt/airflow/data/generate_data.py
-
-# Train the LightGBM model
-docker-compose exec airflow python /opt/airflow/models/train.py --eval
+cd dashboard
+cp .env.example .env.local     # set NEXT_PUBLIC_API_URL (default http://localhost:8000)
+npm install && npm run dev     # → http://localhost:3000
 ```
 
-### 4. Trigger the Pipeline
+## Usage
 
-**Option A — Airflow UI:**
-1. Open http://localhost:8081
-2. Find `nightly_batch_inference` DAG
-3. Click **Trigger DAG** (▷ button)
-4. Watch the 6 tasks execute
-
-**Option B — CLI:**
+Look up a customer's latest score:
 ```bash
-docker-compose exec airflow airflow dags trigger nightly_batch_inference
-```
-
-**Option C — Manual scripts (no Docker):**
-```bash
-# Generate data
-python data/generate_data.py
-
-# Train model
-python models/train.py
-
-# Run Spark inference
-python spark/batch_inference.py --skip-postgres
-
-# Run benchmark
-python benchmark/compare.py
-
-# Start API
-uvicorn api.main:app --port 8000
-
-# Start dashboard
-python gradio_app/app.py
-```
-
----
-
-## Local Development (without Docker)
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up PostgreSQL (or use Docker for just the DB)
-docker run -d --name pg \
-  -e POSTGRES_DB=batch_inference \
-  -e POSTGRES_USER=batch_user \
-  -e POSTGRES_PASSWORD=batch_pass \
-  -p 5432:5432 postgres:16-alpine
-
-# Apply schema
-psql -U batch_user -d batch_inference -f db/schema.sql
-
-# Generate data + train
-python data/generate_data.py
-python models/train.py
-
-# Run components
-python spark/batch_inference.py
-python benchmark/compare.py
-uvicorn api.main:app --reload &
-python gradio_app/app.py
-```
-
----
-
-## Project Structure
-
-```
-ML-System-Design-Batch-Inference/
-├── airflow/
-│   └── dags/
-│       └── batch_inference_dag.py   # 6-task Airflow DAG
-├── api/
-│   ├── main.py                      # FastAPI serving layer (8 endpoints)
-│   └── schemas.py                   # Pydantic v2 request/response models
-├── benchmark/
-│   └── compare.py                   # 3-way: PySpark vs pandas vs joblib
-├── configs/
-│   ├── config.yaml                  # All tuneable parameters
-│   └── settings.py                  # Typed dataclass settings loader
-├── data/
-│   └── generate_data.py             # Faker: 1M synthetic customers
-├── db/
-│   ├── schema.sql                   # PostgreSQL schema (tables + views)
-│   └── connection.py                # SQLAlchemy sync + async engines
-├── gradio_app/
-│   └── app.py                       # 4-tab monitoring dashboard
-├── models/
-│   └── train.py                     # LightGBM training script
-├── monitoring/
-│   └── score_monitor.py             # PSI drift detection
-├── spark/
-│   └── batch_inference.py           # PySpark mapInPandas inference job
-├── Dockerfile.api
-├── Dockerfile.airflow
-├── Dockerfile.gradio
-├── docker-compose.yml               # 5 services
-└── requirements.txt
-```
-
----
-
-## API Reference
-
-```
-GET  /health                          → liveness + DB check
-GET  /stats                           → aggregate pipeline statistics
-GET  /score/{customer_id}            → latest score, <10ms response
-POST /scores/bulk                    → batch lookup (up to 500 IDs)
-GET  /batch-runs                     → paginated run history
-GET  /batch-runs/latest              → most recent completed run
-GET  /batch-runs/{run_id}            → single run details
-GET  /batch-runs/{run_id}/distribution → 10-bin score histogram
-GET  /benchmark                      → latest 3-way benchmark results
-```
-
-**Example: Look up a customer score**
-```bash
-curl http://localhost:8000/score/CUST-0000-000042
+curl http://localhost:8000/score/<customer_id>
 ```
 ```json
 {
-  "customer_id": "CUST-0000-000042",
+  "customer_id": "…",
   "churn_probability": 0.7312,
   "churn_label": true,
   "churn_decile": 8,
   "risk_tier": "high",
   "model_version": "v1.0.0",
-  "scored_at": "2024-01-01T02:45:00Z",
   "run_id": "run-20240101-020000-ab12cd34"
 }
 ```
+*(Example shape — actual values depend on the trained model.)*
 
----
+**API endpoints:** `/health`, `/stats`, `/score/{id}`, `/scores/bulk`, `/batch-runs`, `/batch-runs/latest`, `/batch-runs/{id}`, `/batch-runs/{id}/distribution`, `/benchmark`.
 
-## Resume Talking Points
+## Project Structure
 
-- **Distributed ML inference** using PySpark `mapInPandas` with model broadcasting — exact pattern used at LinkedIn/Airbnb for nightly scoring
-- **Pipeline orchestration** with Apache Airflow (6-task DAG with retries, SLA monitoring, XCom state passing)
-- **Score drift monitoring** using PSI (Population Stability Index) — Basel II standard for financial ML systems
-- **Full prediction audit trail** in PostgreSQL — every score stored with `run_id`, `model_version`, `scored_at` for full lineage
-- **Validated batch pipeline** — 5 automated gates reject the batch before it reaches production
-- **3-way benchmark** demonstrating quantitative tradeoffs: PySpark vs pandas vs joblib at 4 data scales
-- **Pre-computed serving** — FastAPI serves scores from indexed PostgreSQL view in <10ms without loading any model
-- **Docker + docker-compose** — one-command reproducible deployment of all 5 services
+```
+├── data/
+│   ├── download_kkbox.py     # fetch the real dataset from Kaggle
+│   └── build_dataset.py      # KKBox CSVs → customer-level Parquet (ETL)
+├── features.py               # SHARED feature engineering (no train/serve skew)
+├── models/train.py           # LightGBM training + evaluation report
+├── spark/batch_inference.py  # PySpark mapInPandas scoring (cluster scale)
+├── score_batch.py            # pandas scoring (serverless/CI scale) + validation + PSI
+├── bench/compare.py          # 3-way benchmark: PySpark vs pandas vs joblib
+├── monitoring/score_monitor.py  # PSI drift detection
+├── airflow/dags/             # 6-task nightly DAG (local orchestration)
+├── db/schema.sql             # Postgres schema: tables, indexes, analytical views
+├── serving/                  # FastAPI app (app.py, schemas.py)
+├── api/index.py              # Vercel serverless entrypoint → re-exports serving app
+├── dashboard/                # Next.js + TypeScript + Recharts monitoring UI
+├── tests/                    # pytest: feature parity, scoring, ETL leakage
+├── .github/workflows/        # ci.yml (lint+test+build) · nightly.yml (cron scorer)
+└── docker-compose.yml        # local full stack
+```
 
----
+## Testing
 
-## Key Design Decisions
+```bash
+pytest -q            # unit tests
+python features.py   # runnable train/serve-parity self-check
+ruff check . --exclude dashboard
+```
+Current suite (8 tests) covers the shared feature layer's **train==inference parity**, unseen-category safety, the score-derivation mapping, the ETL's aggregation + no-leakage cutoff, and the validation gates. Run automatically on every push/PR via `.github/workflows/ci.yml`. Coverage is not yet formally measured (tracked in the Roadmap).
 
-**Why pre-compute and store vs real-time inference?**
-Not all ML predictions need to be computed on demand. Churn risk doesn't change hourly — computing it once nightly and serving from an indexed DB gives <10ms latency vs ~200ms for model inference, at 1/20th the serving infrastructure cost.
+## Deployment
 
-**Why `mapInPandas` over Pandas UDFs?**
-`mapInPandas` processes entire partitions (batched), while scalar Pandas UDFs process row-by-row. For a 500-tree LightGBM model, vectorized batch inference is 10–50x faster than per-row calls.
+**Not yet deployed** — the target architecture is fully configured but the first cloud deploy is pending (see [TODO.md](./TODO.md)):
 
-**Why PSI over KS test for monitoring?**
-PSI gives a continuous magnitude score that can be trended over time. KS test gives a binary pass/fail. PSI is also the regulatory standard (Basel II) — relevant for financial/insurance use cases.
+- **API** → Vercel Python serverless (`api/index.py` + `vercel.json`), reading Neon. `db/connection.py` switches to `NullPool` + disabled statement cache + SSL when running on Vercel (Neon's pooled endpoint).
+- **Dashboard** → Vercel (Next.js), pointed at the API via `NEXT_PUBLIC_API_URL`.
+- **Database** → Neon serverless Postgres (`DATABASE_URL`).
+- **Nightly scoring** → GitHub Actions cron (`.github/workflows/nightly.yml`) runs `score_batch.py` against the committed sample and writes to Neon.
+
+Locally, `docker-compose up --build` brings up the full Postgres + Spark + Airflow + API stack.
+
+## Impact / Results
+
+No performance or accuracy numbers are claimed yet — the model has not been trained on the real dataset in this environment. The benchmark harness (`bench/compare.py`) measures PySpark vs pandas vs joblib throughput across sample sizes; results will be added here once run, rather than estimated. The **qualitative** win is architectural: replacing on-demand inference with pre-computed, indexed lookups, and guaranteeing consistent predictions across three engines via a single feature module.
+
+## Roadmap
+
+Full checklist in **[TODO.md](./TODO.md)**. Highlights:
+
+- [ ] Train on the real KKBox data (local GPU) and publish measured metrics + benchmark numbers here
+- [ ] First cloud deploy (Neon + Vercel API + Vercel dashboard) and end-to-end verification
+- [ ] Commit the small real sample + model artifacts so the nightly GitHub Actions job runs
+- [ ] Formal test-coverage measurement
+- [ ] Design polish on the dashboard; ADR docs for the key decisions
+- [ ] Model registry / automatic retrain trigger on PSI drift
+
+## License
+
+No license file yet — to be added (MIT is the likely choice for a portfolio project).

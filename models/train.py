@@ -24,14 +24,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import joblib
-import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
@@ -50,6 +48,16 @@ from sklearn.preprocessing import LabelEncoder
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from configs.settings import settings
 
+# Feature engineering lives in ONE place (features.py) so training and the Spark
+# inference job can never drift apart. See features.py for the rationale.
+from features import (
+    CATEGORICAL_COLS,
+    DROP_COLS,
+    TARGET_COL,
+    encode_categoricals,
+    engineer_features,
+)
+
 try:
     import lightgbm as lgb
     from lightgbm import LGBMClassifier
@@ -62,77 +70,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Feature engineering
-# ---------------------------------------------------------------------------
-
-
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add derived features on top of the raw columns.
-    These same features must be reproduced in spark/batch_inference.py.
-    """
-    df = df.copy()
-
-    # Ratio features
-    df["charges_per_tenure"] = (
-        df["monthly_charges"] / (df["tenure_months"] + 1)
-    ).round(4)
-
-    df["support_call_rate"] = (
-        df["num_support_calls"] / (df["tenure_months"] + 1)
-    ).round(4)
-
-    df["avg_charge_per_product"] = (df["monthly_charges"] / df["num_products"]).round(4)
-
-    # Binary risk flags
-    df["is_high_value"] = (df["monthly_charges"] > 80).astype("int8")
-    df["is_disengaged"] = (df["days_since_last_login"] > 60).astype("int8")
-    df["has_payment_issues"] = (df["payment_failures"] > 0).astype("int8")
-
-    # Tenure buckets (ordinal)
-    df["tenure_bucket"] = pd.cut(
-        df["tenure_months"],
-        bins=[-1, 6, 12, 24, 36, 72],
-        labels=[0, 1, 2, 3, 4],
-    ).astype("int8")
-
-    return df
-
-
-def encode_categoricals(
-    df: pd.DataFrame,
-    categorical_cols: List[str],
-    encoders: Dict[str, LabelEncoder] | None = None,
-    fit: bool = True,
-) -> Tuple[pd.DataFrame, Dict[str, LabelEncoder]]:
-    """
-    Label-encode categorical columns.
-
-    If fit=True, creates new LabelEncoders and fits them.
-    If fit=False, uses provided encoders (for inference time consistency).
-    """
-    df = df.copy()
-    if encoders is None:
-        encoders = {}
-
-    for col in categorical_cols:
-        if fit:
-            le = LabelEncoder()
-            df[col] = le.fit_transform(df[col].astype(str))
-            encoders[col] = le
-        else:
-            le = encoders[col]
-            # Handle unseen categories gracefully
-            known = set(le.classes_)
-            df[col] = (
-                df[col].astype(str).apply(lambda x: x if x in known else le.classes_[0])
-            )
-            df[col] = le.transform(df[col])
-
-    return df, encoders
 
 
 # ---------------------------------------------------------------------------
@@ -169,26 +106,12 @@ def prepare_data(
     """
     cfg = settings.model
 
-    # Drop non-feature columns
-    drop_cols = ["customer_id", "actual_churn"]
-    target_col = "actual_churn"
-
     df = engineer_features(df)
+    df, encoders = encode_categoricals(df, CATEGORICAL_COLS, fit=True)
 
-    # Get all categorical columns (from config + any bool columns)
-    cat_cols = settings.data.categorical_features.copy()
-    bool_cols = ["has_phone_service", "has_streaming", "has_tech_support"]
-
-    # Convert booleans to int (LightGBM works better with int than bool)
-    for col in bool_cols:
-        if col in df.columns:
-            df[col] = df[col].astype("int8")
-
-    df, encoders = encode_categoricals(df, cat_cols, fit=True)
-
-    feature_cols = [c for c in df.columns if c not in drop_cols]
+    feature_cols = [c for c in df.columns if c not in DROP_COLS]
     X = df[feature_cols]
-    y = df[target_col].astype("int8")
+    y = df[TARGET_COL].astype("int8")
 
     logger.info(f"Feature matrix: {X.shape}, Churn rate: {y.mean():.1%}")
 

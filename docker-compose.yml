@@ -22,12 +22,15 @@
 
 version: "3.9"
 
+# Local defaults are dummy, local-only credentials. Override any of these via a
+# .env file (see .env.example) — Compose reads it automatically. Real deployments
+# use Neon + Vercel secrets (DATABASE_URL), never these.
 x-common-env: &common-env
   POSTGRES_HOST: postgres
   POSTGRES_PORT: "5432"
   POSTGRES_DB: batch_inference
   POSTGRES_USER: batch_user
-  POSTGRES_PASSWORD: batch_pass
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-batch_pass}
   SPARK_MASTER: "local[*]"
   API_BASE_URL: "http://api:8000"
   PYTHONUNBUFFERED: "1"
@@ -44,11 +47,13 @@ services:
     environment:
       POSTGRES_DB: batch_inference
       POSTGRES_USER: batch_user
-      POSTGRES_PASSWORD: batch_pass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-batch_pass}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # 00_ runs first: give Airflow its own metadata DB, separate from app tables.
+      - ./db/init_airflow_db.sql:/docker-entrypoint-initdb.d/00_airflow_db.sql:ro
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U batch_user -d batch_inference"]
@@ -101,12 +106,11 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://batch_user:batch_pass@postgres:5432/batch_inference"
-      AIRFLOW__WEBSERVER__SECRET_KEY: "batch_inference_secret_key_change_in_prod"
+      # Airflow metadata lives in its OWN database (airflow_meta), not the app DB.
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://batch_user:${POSTGRES_PASSWORD:-batch_pass}@postgres:5432/airflow_meta"
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-local-dev-secret-change-in-prod}
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
       AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
-      # Makes airflow use our postgres for metadata too
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://batch_user:batch_pass@postgres:5432/batch_inference"
     ports:
       - "8081:8080"     # Airflow UI (mapped to 8081 — Spark uses 8080)
     volumes:
@@ -115,7 +119,7 @@ services:
       - ./data:/opt/airflow/data
       - ./models:/opt/airflow/models
       - ./spark:/opt/airflow/spark
-      - ./benchmark:/opt/airflow/benchmark
+      - ./bench:/opt/airflow/bench
       - ./monitoring:/opt/airflow/monitoring
       - ./configs:/opt/airflow/configs
       - ./db:/opt/airflow/db
@@ -165,22 +169,8 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ---------------------------------------------------------------------------
-  # Gradio — 4-tab monitoring dashboard
-  # ---------------------------------------------------------------------------
-  gradio:
-    build:
-      context: .
-      dockerfile: Dockerfile.gradio
-    container_name: batch_gradio
-    environment:
-      <<: *common-env
-    ports:
-      - "7860:7860"
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
+  # The monitoring dashboard is a Next.js app deployed on Vercel (see dashboard/).
+  # Locally, run it with `npm run dev` in dashboard/ pointed at http://localhost:8000.
 
 volumes:
   postgres_data:

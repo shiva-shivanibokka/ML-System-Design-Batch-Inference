@@ -17,13 +17,17 @@ venv/
 env/
 ENV/
 
-# Data files (large — regenerate with data/generate_data.py)
+# Data files (large — rebuild with data/build_dataset.py)
 data/customers.parquet
 data/scored_output.parquet
 data/benchmark_chart.png
 data/benchmark_results.json
 data/*.parquet
 data/*.csv
+data/kkbox_raw/            # raw downloaded KKBox CSVs (hundreds of MB)
+# ...but DO commit the small real sample the nightly CI job scores:
+!data/sample/
+!data/sample/customers.parquet
 
 # Trained model artifacts (regenerate with models/train.py)
 models/churn_model.pkl
@@ -42,6 +46,10 @@ models/*.pkl
 
 # Docker
 .docker/
+
+# Vercel
+.vercel/
+node_modules/
 
 # Logs
 logs/

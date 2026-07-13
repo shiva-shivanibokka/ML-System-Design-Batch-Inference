@@ -13,9 +13,10 @@ Usage:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import yaml
 
@@ -44,9 +45,20 @@ class DatabaseSettings:
     password: str
     pool_size: int
     max_overflow: int
+    # Full connection string (Neon/Vercel style). When set, it wins over the parts.
+    url_override: Optional[str] = None
+
+    def _with_driver(self, driver: str) -> str:
+        """Normalise url_override to the requested SQLAlchemy driver."""
+        raw = self.url_override or ""
+        # `postgres://` (Heroku/Neon style) → `postgresql://`
+        raw = re.sub(r"^postgres(ql)?(\+\w+)?://", "postgresql://", raw, count=1)
+        return raw.replace("postgresql://", f"postgresql+{driver}://", 1)
 
     @property
     def url(self) -> str:
+        if self.url_override:
+            return self._with_driver("psycopg2")  # sslmode=... kept (psycopg2 understands it)
         return (
             f"postgresql+psycopg2://{self.user}:{self.password}"
             f"@{self.host}:{self.port}/{self.name}"
@@ -54,6 +66,10 @@ class DatabaseSettings:
 
     @property
     def async_url(self) -> str:
+        if self.url_override:
+            # asyncpg doesn't accept the libpq `sslmode` query param — strip it;
+            # SSL is supplied via connect_args in db/connection.py instead.
+            return re.sub(r"[?&]sslmode=[^&]+", "", self._with_driver("asyncpg"))
         return (
             f"postgresql+asyncpg://{self.user}:{self.password}"
             f"@{self.host}:{self.port}/{self.name}"
@@ -62,10 +78,13 @@ class DatabaseSettings:
 
 @dataclass
 class DataSettings:
-    n_customers: int
-    random_seed: int
+    dataset: str
+    raw_dir: str
     output_path: str
-    churn_rate: float
+    reference_date: int
+    members_file: str
+    transactions_file: str
+    labels_file: str
     numeric_features: List[str]
     categorical_features: List[str]
 
@@ -192,14 +211,18 @@ def _build_settings() -> Settings:
         password=os.getenv("POSTGRES_PASSWORD", db_raw["password"]),
         pool_size=db_raw["pool_size"],
         max_overflow=db_raw["max_overflow"],
+        url_override=os.getenv("DATABASE_URL"),
     )
 
     data_raw = raw["data"]
     data = DataSettings(
-        n_customers=data_raw["n_customers"],
-        random_seed=data_raw["random_seed"],
+        dataset=data_raw["dataset"],
+        raw_dir=data_raw["raw_dir"],
         output_path=data_raw["output_path"],
-        churn_rate=data_raw["churn_rate"],
+        reference_date=int(data_raw["reference_date"]),
+        members_file=data_raw["members_file"],
+        transactions_file=data_raw["transactions_file"],
+        labels_file=data_raw["labels_file"],
         numeric_features=data_raw["numeric_features"],
         categorical_features=data_raw["categorical_features"],
     )

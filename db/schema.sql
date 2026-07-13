@@ -12,44 +12,39 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ---------------------------------------------------------------------------
 -- customers
--- Source table — 1M synthetic customer records.
--- In production this would be populated by an upstream ETL.
--- The batch pipeline reads this table, infers churn probability, and writes
--- results to the predictions table.
+-- Source table — the customer-level view of the KKBox dataset, one row per
+-- member (msno). This mirrors data/customers.parquet, which is what the batch
+-- pipeline actually reads. In production this would be populated by upstream
+-- ETL; here data/build_dataset.py produces the equivalent Parquet.
+-- Columns are the raw KKBox features (see configs/config.yaml); the model's
+-- derived ratio/flag features are computed at inference time in features.py.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS customers (
-    customer_id             VARCHAR(36)     PRIMARY KEY DEFAULT uuid_generate_v4()::TEXT,
-    -- Demographics
-    age                     SMALLINT        NOT NULL CHECK (age BETWEEN 18 AND 90),
-    region                  VARCHAR(16)     NOT NULL,
-    -- Account
-    tenure_months           SMALLINT        NOT NULL CHECK (tenure_months >= 0),
-    contract_type           VARCHAR(24)     NOT NULL,
-    payment_method          VARCHAR(32)     NOT NULL,
-    -- Services
-    internet_service        VARCHAR(16)     NOT NULL,
-    has_phone_service       BOOLEAN         NOT NULL,
-    has_streaming           BOOLEAN         NOT NULL,
-    has_tech_support        BOOLEAN         NOT NULL,
-    -- Billing
-    monthly_charges         NUMERIC(8, 2)   NOT NULL CHECK (monthly_charges >= 0),
-    total_charges           NUMERIC(12, 2)  NOT NULL CHECK (total_charges >= 0),
-    payment_failures        SMALLINT        NOT NULL DEFAULT 0,
-    -- Engagement
-    num_products            SMALLINT        NOT NULL CHECK (num_products BETWEEN 1 AND 10),
-    num_support_calls       SMALLINT        NOT NULL DEFAULT 0,
-    avg_session_minutes     NUMERIC(8, 2)   NOT NULL DEFAULT 0,
-    days_since_last_login   SMALLINT        NOT NULL DEFAULT 0,
-    referrals_given         SMALLINT        NOT NULL DEFAULT 0,
-    -- Ground truth (populated during evaluation, NULL at inference time)
-    actual_churn            BOOLEAN,
+    customer_id             VARCHAR(64)     PRIMARY KEY,   -- KKBox msno (hashed, ~44 chars)
+    -- Demographics (members_v3)
+    city                    INTEGER,
+    bd                      INTEGER,                        -- age; dirty in KKBox, nullable
+    gender                  VARCHAR(16),
+    registered_via          INTEGER,
+    registration_days       INTEGER,                        -- days registered before cutoff
+    -- Subscription/payment behaviour (aggregated from transactions_v2)
+    n_transactions          INTEGER         NOT NULL DEFAULT 0,
+    total_paid              NUMERIC(14, 2)  NOT NULL DEFAULT 0,
+    avg_plan_price          NUMERIC(10, 2),
+    avg_plan_days           NUMERIC(8, 2),
+    total_discount          NUMERIC(14, 2)  NOT NULL DEFAULT 0,
+    n_auto_renew            INTEGER         NOT NULL DEFAULT 0,
+    n_cancels               INTEGER         NOT NULL DEFAULT 0,
+    membership_tenure_days  INTEGER,
+    days_to_expire          INTEGER,
+    payment_method_id       INTEGER,
+    last_is_auto_renew      SMALLINT,
+    last_is_cancel          SMALLINT,
+    -- Ground-truth label (KKBox train_v2)
+    is_churn                SMALLINT,
     -- Metadata
     created_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
-
--- Index for fast batch reads partitioned by region (mirrors Spark partitioning)
-CREATE INDEX IF NOT EXISTS idx_customers_region ON customers (region);
-CREATE INDEX IF NOT EXISTS idx_customers_contract ON customers (contract_type);
 
 -- ---------------------------------------------------------------------------
 -- batch_runs
@@ -101,7 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_batch_runs_status ON batch_runs (status);
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS predictions (
     id                      BIGSERIAL       PRIMARY KEY,
-    customer_id             VARCHAR(36)     NOT NULL,
+    customer_id             VARCHAR(64)     NOT NULL,       -- KKBox msno (~44 chars)
     run_id                  VARCHAR(64)     NOT NULL REFERENCES batch_runs(run_id),
     model_version           VARCHAR(32)     NOT NULL,
     churn_probability       NUMERIC(6, 4)   NOT NULL CHECK (churn_probability BETWEEN 0 AND 1),

@@ -26,10 +26,7 @@ Complexity is in the Python callables, not the DAG topology.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import subprocess
 import sys
 import time
 import uuid
@@ -38,7 +35,6 @@ from pathlib import Path
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.utils.dates import days_ago
 
 # ---------------------------------------------------------------------------
 # Path setup — the DAG file runs inside the Airflow container where
@@ -201,7 +197,7 @@ def task_run_spark_inference(**context) -> dict:
 
     # Import and run directly (faster than subprocess in local mode)
     sys.path.insert(0, str(_AIRFLOW_ROOT / "spark"))
-    from spark.batch_inference import run_batch_inference, write_predictions_to_postgres
+    from spark.batch_inference import run_batch_inference
 
     t0 = time.perf_counter()
     result = run_batch_inference(run_id=run_id)
@@ -434,8 +430,8 @@ def task_run_benchmark(**context) -> dict:
         task_ids="t1_validate_inputs", key="run_id"
     )
 
-    sys.path.insert(0, str(_AIRFLOW_ROOT / "benchmark"))
-    from benchmark.compare import run_benchmark
+    sys.path.insert(0, str(_AIRFLOW_ROOT / "bench"))
+    from bench.compare import run_benchmark
 
     logger.info("Running 3-way benchmark comparison...")
     results = run_benchmark(run_id=run_id)
@@ -566,8 +562,8 @@ with DAG(
         "using PySpark, validates scores, writes to PostgreSQL, and runs "
         "benchmark comparison."
     ),
-    schedule_interval=_CFG.airflow.schedule,
-    start_date=days_ago(1),
+    schedule=_CFG.airflow.schedule,
+    start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
     catchup=_CFG.airflow.catchup,
     default_args=DEFAULT_ARGS,
     tags=_CFG.airflow.tags,

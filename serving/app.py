@@ -24,16 +24,15 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from configs.settings import settings
 from db.connection import get_db, _async_engine, ping_database
-from api.schemas import (
+from serving.schemas import (
     BatchRunListResponse,
     BatchRunResponse,
     BenchmarkComparisonResponse,
@@ -96,9 +95,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# CORS_ORIGINS is a comma-separated allowlist (the dashboard's Vercel URL in prod).
+# Defaults to "*" for local dev; set it to the real origin(s) in production.
+_cors = os.getenv("CORS_ORIGINS", "*")
+_allow_origins = ["*"] if _cors.strip() == "*" else [o.strip() for o in _cors.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=_allow_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -505,7 +509,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "api.main:app",
+        "serving.app:app",
         host=settings.api.host,
         port=settings.api.port,
         reload=False,

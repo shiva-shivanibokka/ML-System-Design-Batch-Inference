@@ -34,10 +34,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -52,7 +50,8 @@ import pandas as pd
 _PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from configs.settings import settings
+from configs.settings import settings  # noqa: E402  (after sys.path setup above)
+from features import predict_scores  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,133 +62,39 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Feature engineering — must match models/train.py exactly
-# ---------------------------------------------------------------------------
-
-
-def _engineer_features_pandas(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply the same feature engineering as models/train.py.
-    Called inside each Spark partition on a pandas DataFrame.
-    """
-    df = df.copy()
-
-    df["charges_per_tenure"] = (
-        df["monthly_charges"] / (df["tenure_months"] + 1)
-    ).round(4)
-
-    df["support_call_rate"] = (
-        df["num_support_calls"] / (df["tenure_months"] + 1)
-    ).round(4)
-
-    df["avg_charge_per_product"] = (df["monthly_charges"] / df["num_products"]).round(4)
-
-    df["is_high_value"] = (df["monthly_charges"] > 80).astype("int8")
-    df["is_disengaged"] = (df["days_since_last_login"] > 60).astype("int8")
-    df["has_payment_issues"] = (df["payment_failures"] > 0).astype("int8")
-
-    df["tenure_bucket"] = pd.cut(
-        df["tenure_months"],
-        bins=[-1, 6, 12, 24, 36, 72],
-        labels=[0, 1, 2, 3, 4],
-    ).astype("int8")
-
-    return df
-
-
-def _encode_categoricals_pandas(
-    df: pd.DataFrame,
-    encoders: dict,
-) -> pd.DataFrame:
-    """
-    Apply pre-fitted label encoders to categorical columns.
-    Handles unseen categories by mapping to the first known class.
-    """
-    df = df.copy()
-    for col, le in encoders.items():
-        if col not in df.columns:
-            continue
-        known = set(le.classes_)
-        df[col] = (
-            df[col].astype(str).apply(lambda x: x if x in known else le.classes_[0])
-        )
-        df[col] = le.transform(df[col])
-    return df
-
-
-# ---------------------------------------------------------------------------
 # Spark partition inference function
 # ---------------------------------------------------------------------------
 
 
-def _make_partition_predictor(
-    model_bytes: bytes,
-    encoders_bytes: bytes,
-    feature_cols: list,
-):
+def _make_partition_predictor(bc_model, bc_encoders, bc_features):
     """
-    Factory that creates a closure capturing broadcast values.
+    Factory that builds the mapInPandas closure.
 
-    Returns a function with signature:
-        (Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]
-
-    This is the mapInPandas pattern — processes one partition at a time.
-    Each executor deserializes the model ONCE per partition call (not per row).
+    It closes over the Spark BROADCAST VARIABLES (bc_*), not their raw values.
+    That distinction is the whole point of broadcasting: `.value` is read INSIDE
+    predict_partition, i.e. on the executor, so Spark ships the model to each
+    executor once and caches it — instead of serialising the full model into
+    every task closure. (The previous version passed `broadcast.value` on the
+    driver, which silently defeated the broadcast and shipped the model per task.)
+    Each executor deserialises the model once per partition, not once per row.
     """
 
     def predict_partition(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         import io
         import joblib
 
-        # Deserialize model + encoders from broadcast bytes
-        # This happens once per partition per executor — not once per row
-        model = joblib.load(io.BytesIO(model_bytes))
-        encoders = joblib.load(io.BytesIO(encoders_bytes))
+        # Read broadcast values ON THE EXECUTOR (this is what makes it a broadcast).
+        model = joblib.load(io.BytesIO(bc_model.value))
+        encoders = joblib.load(io.BytesIO(bc_encoders.value))
+        feature_cols = bc_features.value
 
         for batch_df in iterator:
             if batch_df.empty:
                 yield batch_df
                 continue
-
-            # Keep customer_id aside for output
-            customer_ids = batch_df["customer_id"].values
-
-            # Convert bool columns to int
-            bool_cols = ["has_phone_service", "has_streaming", "has_tech_support"]
-            for col in bool_cols:
-                if col in batch_df.columns:
-                    batch_df[col] = batch_df[col].astype("int8")
-
-            # Apply feature engineering
-            batch_df = _engineer_features_pandas(batch_df)
-            batch_df = _encode_categoricals_pandas(batch_df, encoders)
-
-            # Align columns to training feature order
-            X = batch_df[feature_cols].astype("float32")
-
-            # LightGBM inference — vectorized over the entire partition
-            churn_prob = model.predict_proba(X)[:, 1]
-
-            # Derive labels + decile + risk tier
-            churn_label = (churn_prob >= 0.5).astype(bool)
-            churn_decile = np.clip(np.ceil(churn_prob * 10).astype(int), 1, 10)
-            risk_tier = np.where(
-                churn_prob >= 0.70,
-                "high",
-                np.where(churn_prob >= 0.40, "medium", "low"),
-            )
-
-            result_df = pd.DataFrame(
-                {
-                    "customer_id": customer_ids,
-                    "churn_probability": np.round(churn_prob, 4).astype(float),
-                    "churn_label": churn_label,
-                    "churn_decile": churn_decile,
-                    "risk_tier": risk_tier,
-                }
-            )
-
-            yield result_df
+            # Feature engineering + inference + output derivation — all shared with
+            # training and the pandas scorer via features.py (no skew possible).
+            yield predict_scores(model, batch_df, encoders, feature_cols)
 
     return predict_partition
 
@@ -212,7 +117,6 @@ def run_batch_inference(run_id: str) -> dict:
     dict with job metadata: records_scored, duration_secs, score_stats, etc.
     """
     from pyspark.sql import SparkSession
-    from pyspark.sql import functions as F
     from pyspark.sql.types import (
         DoubleType,
         BooleanType,
@@ -326,9 +230,9 @@ def run_batch_inference(run_id: str) -> dict:
     t_infer = time.perf_counter()
 
     predict_fn = _make_partition_predictor(
-        model_bytes=broadcast_model.value,
-        encoders_bytes=broadcast_encoders.value,
-        feature_cols=broadcast_features.value,
+        broadcast_model,
+        broadcast_encoders,
+        broadcast_features,
     )
 
     scored_df = df.mapInPandas(predict_fn, schema=output_schema)
@@ -397,7 +301,6 @@ def write_predictions_to_postgres(run_id: str, output_path: str) -> int:
 
     Returns total rows inserted.
     """
-    from sqlalchemy import text
     from db.connection import _sync_engine
 
     logger.info(f"Writing predictions to PostgreSQL (run_id={run_id})...")

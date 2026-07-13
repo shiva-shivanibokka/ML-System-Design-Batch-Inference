@@ -17,33 +17,43 @@ database:
   max_overflow: 20
 
 # -----------------------------------------------------------------------------
-# Data Generation
+# Dataset — KKBox Churn Prediction (WSDM Cup 2018, Kaggle)
+# Real subscription data: ~970K labelled members. We use members + transactions
+# (the ~30GB user_logs are intentionally skipped — see data/build_dataset.py).
+# Download with data/download_kkbox.py (needs a Kaggle API token), then build the
+# customer-level Parquet with data/build_dataset.py.
 # -----------------------------------------------------------------------------
 data:
-  n_customers: 1_000_000
-  random_seed: 42
-  output_path: data/customers.parquet
-  churn_rate: 0.185          # ~18.5% base churn rate (realistic telecoms/SaaS)
-  # Feature definitions (used by both generator and model)
+  dataset: kkbox
+  raw_dir: data/kkbox_raw               # where the downloaded CSVs land
+  output_path: data/customers.parquet   # customer-level table the pipeline reads
+  # Churn is defined relative to a cutoff. train_v2 predicts churn in Mar 2017,
+  # so features must only use data up to the end of Feb 2017 (no leakage).
+  reference_date: 20170301
+  members_file: members_v3.csv
+  transactions_file: transactions_v2.csv
+  labels_file: train_v2.csv
+  # Raw feature definitions (used by both the ETL and the model layer).
+  # Engineered ratio features are added in features.py, not listed here.
   numeric_features:
-    - age
-    - tenure_months
-    - monthly_charges
-    - total_charges
-    - num_products
-    - num_support_calls
-    - avg_session_minutes
-    - days_since_last_login
-    - payment_failures
-    - referrals_given
+    - bd                      # age (clipped — KKBox bd has extreme outliers)
+    - registration_days       # days registered before the reference date
+    - n_transactions
+    - total_paid
+    - avg_plan_price
+    - avg_plan_days
+    - total_discount
+    - n_auto_renew
+    - n_cancels
+    - membership_tenure_days
+    - days_to_expire          # membership expiry relative to reference date
   categorical_features:
-    - contract_type          # month-to-month, one-year, two-year
-    - payment_method         # credit_card, bank_transfer, electronic_check, mailed_check
-    - internet_service       # fiber, dsl, none
-    - has_phone_service      # yes, no
-    - has_streaming          # yes, no
-    - has_tech_support       # yes, no
-    - region                 # north, south, east, west, central
+    - city
+    - gender
+    - registered_via
+    - payment_method_id       # most-used payment method
+    - last_is_auto_renew      # auto-renew on the latest transaction
+    - last_is_cancel          # cancel flag on the latest transaction
 
 # -----------------------------------------------------------------------------
 # Model

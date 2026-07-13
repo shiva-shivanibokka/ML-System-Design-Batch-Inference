@@ -1,0 +1,39 @@
+name: Nightly batch scoring
+
+# Replaces the always-on Airflow scheduler for the deployed demo: GitHub Actions
+# IS the cron. Runs the pandas scorer (the right-sized engine at this scale) over
+# the committed sample and writes the audit trail to Neon, which the API/dashboard read.
+#
+# Requires (see TODO.md):
+#   - Repo secret DATABASE_URL   → Neon pooled connection string (sslmode=require)
+#   - Committed model artifacts   → models/churn_model.pkl, label_encoders.pkl, feature_columns.pkl
+#   - Committed scoring input     → data/sample/customers.parquet  (a real KKBox slice)
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # 02:00 UTC daily
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  score:
+    name: Score & write to Neon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install pipeline deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install lightgbm scikit-learn pandas numpy joblib pyarrow \
+                      sqlalchemy psycopg2-binary pyyaml
+      - name: Guard — required artifacts present
+        run: |
+          test -f models/churn_model.pkl || { echo "::error::commit the trained model (see TODO.md)"; exit 1; }
+          test -f data/sample/customers.parquet || { echo "::error::commit data/sample/customers.parquet (see TODO.md)"; exit 1; }
+      - name: Run batch scoring
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python score_batch.py --input data/sample/customers.parquet

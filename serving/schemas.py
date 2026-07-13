@@ -28,6 +28,7 @@ class CustomerScoreResponse(BaseModel):
     scored_at: datetime
 
     model_config = {
+        "protected_namespaces": (),  # allow the `model_version` field name
         "json_schema_extra": {
             "example": {
                 "customer_id": "CUST-0000-000042",
@@ -75,6 +76,7 @@ class BatchRunResponse(BaseModel):
     wall_clock_secs: Optional[float] = None
 
     model_config = {
+        "protected_namespaces": (),  # allow the `model_version` field name
         "json_schema_extra": {
             "example": {
                 "run_id": "run-20240101-020000-ab12cd34",

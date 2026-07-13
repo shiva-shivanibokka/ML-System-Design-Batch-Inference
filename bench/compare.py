@@ -28,9 +28,9 @@ Key results to look for:
   - All three should produce IDENTICAL predictions (verified in the benchmark)
 
 Usage:
-    python benchmark/compare.py
-    python benchmark/compare.py --sizes 10000 100000 1000000
-    python benchmark/compare.py --no-chart    # skip matplotlib chart
+    python bench/compare.py
+    python bench/compare.py --sizes 10000 100000 1000000
+    python bench/compare.py --no-chart    # skip matplotlib chart
 """
 
 from __future__ import annotations
@@ -84,17 +84,10 @@ def _load_artifacts():
 def _prepare_batch(
     df: pd.DataFrame, encoders: dict, feature_cols: list
 ) -> pd.DataFrame:
-    """Apply feature engineering + encoding. Must match models/train.py."""
-    from models.train import engineer_features, encode_categoricals
+    """Apply feature engineering + encoding via the shared features.py."""
+    from features import build_feature_matrix
 
-    bool_cols = ["has_phone_service", "has_streaming", "has_tech_support"]
-    for col in bool_cols:
-        if col in df.columns:
-            df[col] = df[col].astype("int8")
-
-    df = engineer_features(df)
-    df, _ = encode_categoricals(df, list(encoders.keys()), encoders=encoders, fit=False)
-    return df[feature_cols].astype("float32")
+    return build_feature_matrix(df, encoders, feature_cols)
 
 
 def _predict_chunk(
@@ -117,7 +110,6 @@ def _benchmark_pyspark(df: pd.DataFrame, model, encoders, feature_cols) -> Dict:
     import io
     from pyspark.sql import SparkSession
     from pyspark.sql.types import DoubleType, StringType, StructField, StructType
-    from spark.batch_inference import _make_partition_predictor
 
     cfg = settings.spark
 
@@ -157,7 +149,9 @@ def _benchmark_pyspark(df: pd.DataFrame, model, encoders, feature_cols) -> Dict:
     )
 
     def _output_schema_predictor(iterator):
-        import io, joblib
+        import io
+        import joblib
+        from features import build_feature_matrix
 
         _model = joblib.load(io.BytesIO(bc_model.value))
         _encoders = joblib.load(io.BytesIO(bc_encoders.value))
@@ -167,17 +161,7 @@ def _benchmark_pyspark(df: pd.DataFrame, model, encoders, feature_cols) -> Dict:
                 yield batch_df
                 continue
             cids = batch_df["customer_id"].values
-            bool_cols = ["has_phone_service", "has_streaming", "has_tech_support"]
-            for col in bool_cols:
-                if col in batch_df.columns:
-                    batch_df[col] = batch_df[col].astype("int8")
-            from models.train import engineer_features, encode_categoricals
-
-            batch_df = engineer_features(batch_df)
-            batch_df, _ = encode_categoricals(
-                batch_df, list(_encoders.keys()), encoders=_encoders, fit=False
-            )
-            X = batch_df[_features].astype("float32")
+            X = build_feature_matrix(batch_df, _encoders, _features)
             probs = _model.predict_proba(X)[:, 1]
             yield pd.DataFrame({"customer_id": cids, "churn_probability": probs})
 
