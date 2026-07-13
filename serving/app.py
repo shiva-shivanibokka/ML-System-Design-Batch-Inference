@@ -31,9 +31,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---------------------------------------------------------------------------
@@ -120,6 +123,22 @@ async def add_timing_header(request, call_next):
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
     response.headers["X-Response-Time-Ms"] = str(elapsed_ms)
     return response
+
+
+# Any database error (unreachable DB, bad creds, timeout) becomes a clean 503
+# instead of a 500 with a leaked stack trace — one handler covers every endpoint.
+# Covers SQLAlchemy-wrapped errors, raw asyncpg auth/server errors, and network
+# errors (connection refused/timeout) — asyncpg connection failures escape unwrapped.
+async def _db_error_handler(request, exc):
+    logger.error("Database error on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database temporarily unavailable. Please retry."},
+    )
+
+
+for _db_exc in (SQLAlchemyError, asyncpg.PostgresError, OSError):
+    app.add_exception_handler(_db_exc, _db_error_handler)
 
 
 # ---------------------------------------------------------------------------

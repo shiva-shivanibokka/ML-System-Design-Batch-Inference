@@ -20,8 +20,10 @@ Legend: ⬜ not started · 🧪 needs your testing (I couldn't run it here)
   `python data/build_dataset.py --limit 20000 --output data/sample/customers.parquet` then `git add data/sample/customers.parquet`
 - ⬜ **Commit model artifacts** for nightly CI (git-ignored by default):
   `git add -f models/churn_model.pkl models/label_encoders.pkl models/feature_columns.pkl`
-- 🧪 **Local full stack**: copy `.env.example` → `.env`, then `docker-compose up --build`. Verify the Airflow DAG + Spark broadcast path on the real parquet. *(Not yet run — the pandas path above is proven; Spark/Airflow still to test.)*
-- 🧪 **Local API + dashboard**: `uvicorn serving.app:app --port 8000`, then in `dashboard/`: `npm install`, `npm run dev` (commit the generated `package-lock.json`).
+- ✅ **API boots + serves**: verified via FastAPI TestClient — 13 routes, `/health`/`/docs`/`/openapi.json` all 200; DB-down now returns a clean **503** (not a leaked 500).
+- ✅ **Dashboard builds**: `npm install && npm run build` succeeds (Next.js compiles, TypeScript valid, 4/4 pages). `package-lock.json` generated + committed.
+- 🧪 **Spark job + docker-compose full stack**: **could not run on this machine — no Java (Spark needs a JVM) and no Docker.** Run `docker-compose up --build` on a machine with Docker to verify the Airflow DAG + Spark broadcast path on the real parquet. (The pandas scoring path is fully proven, so the ML logic is verified; only the Spark/Airflow wrappers are untested.)
+- 🧪 **Dashboard against a live API**: `uvicorn serving.app:app --port 8000` + `npm run dev` in `dashboard/` — build is verified; rendering against real data still to eyeball.
 
 ## B. Deploy (all free tiers)
 
@@ -31,11 +33,15 @@ Legend: ⬜ not started · 🧪 needs your testing (I couldn't run it here)
 - ⬜ **GitHub secret**: add `DATABASE_URL` (repo → Settings → Secrets) so `nightly.yml` can write to Neon.
 - 🧪 **First nightly run**: trigger `Nightly batch scoring` manually (Actions tab → Run workflow) once the model + `data/sample/customers.parquet` are committed.
 
-## C. Verify (things I built but could not run here)
+## C. Verify
 
-- 🧪 **Neon + asyncpg**: confirm the API connects (the `VERCEL` branch in `db/connection.py` sets `statement_cache_size=0` + `ssl=require` for the pooled endpoint) — this is the most likely first-deploy snag.
-- 🧪 **Dashboard charts** render against the live API (Recharts log-scale axis on the Benchmark tab especially).
-- 🧪 **CI**: push a branch and confirm both jobs (Python lint+test, Next.js build) pass.
+Done locally (see Section A): dataset build, training (AUC 0.812), end-to-end pandas scoring, API boot + 503 handling, dashboard build, `pytest` (8), `ruff`.
+
+Still to verify:
+- 🧪 **Neon + asyncpg on the real endpoint**: confirm the API connects (the `VERCEL` branch in `db/connection.py` sets `statement_cache_size=0` + `ssl=require` for the pooled endpoint) — the most likely first-deploy snag.
+- 🧪 **CI on GitHub**: the workflows exist; confirm both jobs (Python lint+test, Next.js build) go green on a push.
+- 🧪 **Spark / docker-compose**: needs a machine with Java + Docker (see Section A).
+- ⬜ *(optional)* add an API integration test to CI (would need fastapi/httpx/sqlalchemy in the CI install list).
 
 ## D. Deferred polish / known gaps (optional, nice-to-have)
 
