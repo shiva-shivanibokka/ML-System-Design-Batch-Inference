@@ -7,13 +7,13 @@
 ![Next.js](https://img.shields.io/badge/dashboard-Next.js%2014-black)
 ![Status](https://img.shields.io/badge/status-in%20active%20build-orange)
 
-> **Status:** mid-build. The full pipeline is implemented and unit-tested; training on the real dataset, first cloud deploy, and end-to-end verification are tracked in **[TODO.md](./TODO.md)** and the [Roadmap](#roadmap) below.
+> **Status:** the pipeline is **trained and verified end-to-end locally** on the real KKBox data (build → train → score → API → dashboard build, all passing — AUC 0.81). The remaining work is the first **cloud deploy** (Neon + Vercel) and running the Spark/Docker full stack on a machine with Java + Docker — tracked in **[TODO.md](./TODO.md)** and the [Roadmap](#roadmap) below.
 
 ---
 
 ## Recruiter TL;DR
 
-- **What it does:** pre-computes churn scores for ~970K real music-streaming subscribers (KKBox dataset) on a schedule, stores every prediction with full lineage, and serves them with sub-lookup latency behind an API + dashboard.
+- **What it does:** pre-computes churn scores for ~970K real music-streaming subscribers (KKBox dataset) on a schedule, stores every prediction with full lineage, and serves them as low-latency indexed lookups behind an API + dashboard.
 - **Hardest problem solved:** eliminating **train/serve skew** across three inference engines (LightGBM training, PySpark distributed scoring, and a pandas serverless path) by routing all of them through one shared feature module — and fixing a real Spark model-broadcast bug that silently shipped the model into every task.
 - **Measured on the real data:** LightGBM churn model **AUC-ROC 0.81** (held-out test); the pandas scoring path scores all **970,960 subscribers in ~10s (~95K records/sec)** on a single machine.
 
@@ -34,6 +34,7 @@ This project is a portfolio piece demonstrating that pattern end-to-end on a **r
 - **Full audit trail** — every score persisted with `run_id`, `model_version`, and `scored_at`; downstream reads the latest score per customer from an indexed view.
 - **5-gate validation** — record count, null rate, score range, non-degenerate distribution, and plausible churn rate; a bad batch is rejected before it reaches the serving table.
 - **PSI drift monitoring** — Population Stability Index (Basel II standard) between consecutive runs, surfaced on the dashboard.
+- **Graceful degradation** — a global handler turns any database failure (unreachable, bad creds, timeout) into a clean `503` instead of a leaked `500`; `/health` reports `degraded` rather than crashing.
 - **Serverless API + Next.js dashboard** — FastAPI on Vercel serving pre-computed scores; a Next.js + Recharts dashboard for run history, score distribution, benchmark comparison, and customer lookup.
 
 ## Architecture
@@ -195,7 +196,7 @@ pytest -q            # unit tests
 python features.py   # runnable train/serve-parity self-check
 ruff check . --exclude dashboard
 ```
-Current suite (8 tests) covers the shared feature layer's **train==inference parity**, unseen-category safety, the score-derivation mapping, the ETL's aggregation + no-leakage cutoff, and the validation gates. Run automatically on every push/PR via `.github/workflows/ci.yml`. Coverage is not yet formally measured (tracked in the Roadmap).
+Current suite (8 tests) covers the shared feature layer's **train==inference parity**, unseen-category safety, the score-derivation mapping, the ETL's aggregation + no-leakage cutoff, and the validation gates. CI (`.github/workflows/ci.yml`) runs them plus `ruff` on every push/PR **and** builds the Next.js dashboard (`tsc` + `next build`). The FastAPI app boot and its endpoints were verified with the in-process test client (`/health`, `/docs`, `/openapi.json` → 200; DB-down → 503). Coverage is not yet formally measured (tracked in the Roadmap).
 
 ## Deployment
 
