@@ -2,9 +2,9 @@
 
 > Nightly batch ML system that scores ~970K real subscribers for churn using distributed inference, an audit-trailed Postgres store, a serverless API, and a live monitoring dashboard.
 
+[![CI](https://github.com/shiva-shivanibokka/ML-System-Design-Batch-Inference/actions/workflows/ci.yml/badge.svg)](https://github.com/shiva-shivanibokka/ML-System-Design-Batch-Inference/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![Next.js](https://img.shields.io/badge/dashboard-Next.js%2014-black)
-![Tests](https://img.shields.io/badge/tests-pytest-green)
 ![Status](https://img.shields.io/badge/status-in%20active%20build-orange)
 
 > **Status:** mid-build. The full pipeline is implemented and unit-tested; training on the real dataset, first cloud deploy, and end-to-end verification are tracked in **[TODO.md](./TODO.md)** and the [Roadmap](#roadmap) below.
@@ -112,8 +112,10 @@ flowchart TB
 - Docker Desktop (for the local full stack), Python 3.11, Node 20 (for the dashboard)
 - A Kaggle account + API token (dataset download)
 
-### 1. Configure
+### 1. Clone and configure
 ```bash
+git clone https://github.com/shiva-shivanibokka/ML-System-Design-Batch-Inference.git
+cd ML-System-Design-Batch-Inference
 cp .env.example .env         # local docker-compose reads this automatically
 ```
 
