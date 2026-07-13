@@ -24,7 +24,9 @@ data/benchmark_chart.png
 data/benchmark_results.json
 data/*.parquet
 data/*.csv
-data/kkbox_raw/            # raw downloaded KKBox CSVs (hundreds of MB)
+# raw downloaded KKBox CSVs (hundreds of MB) — gitignore has NO inline comments,
+# so this pattern must be on its own line:
+data/kkbox_raw/
 # ...but DO commit the small real sample the nightly CI job scores:
 !data/sample/
 !data/sample/customers.parquet

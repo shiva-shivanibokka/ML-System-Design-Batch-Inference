@@ -349,7 +349,8 @@ def main() -> None:
             key=lambda x: -x[1],
         )[:15]
         for feat, imp in importances:
-            bar = "█" * int(imp / max(i for _, i in importances) * 30)
+            # ASCII bar — the Unicode block char crashes on Windows cp1252 consoles.
+            bar = "#" * int(imp / max(i for _, i in importances) * 30)
             print(f"  {feat:<30} {bar} ({imp})")
         print()
 

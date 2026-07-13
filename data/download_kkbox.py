@@ -35,8 +35,9 @@ logger = logging.getLogger(__name__)
 COMPETITION = "kkbox-churn-prediction-challenge"
 
 # The only files we use. user_logs* are deliberately excluded.
-DEFAULT_FILES = ["members_v3.csv", "transactions_v2.csv", "train_v2.csv"]
-EXTRA_FILES = ["transactions.csv", "train.csv"]
+# Kaggle serves these 7z-compressed. We fetch the .7z and extract to .csv.
+DEFAULT_FILES = ["members_v3.csv.7z", "transactions_v2.csv.7z", "train_v2.csv.7z"]
+EXTRA_FILES = ["transactions.csv.7z", "train.csv.7z"]
 
 
 def _authenticate():
@@ -61,25 +62,48 @@ def _authenticate():
     return api
 
 
+def _extract(archive: Path, raw_dir: Path) -> None:
+    """Extract a Kaggle download. Files come as .7z; a single file may also be
+    wrapped in an outer .zip by the API — handle both."""
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(raw_dir)
+        archive.unlink()
+        # The zip usually contains the .7z — extract that next.
+        inner = raw_dir / archive.stem
+        if inner.suffix == ".7z" and inner.exists():
+            _extract(inner, raw_dir)
+    elif archive.suffix == ".7z":
+        import py7zr
+
+        with py7zr.SevenZipFile(archive, mode="r") as z:
+            z.extractall(path=raw_dir)
+        archive.unlink()
+
+
 def download(files: list[str], raw_dir: Path) -> None:
     api = _authenticate()
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     for fname in files:
-        target = raw_dir / fname
-        if target.exists():
-            logger.info("Already present, skipping: %s", target)
+        csv_name = fname.replace(".7z", "")
+        if (raw_dir / csv_name).exists():
+            logger.info("Already present, skipping: %s", csv_name)
             continue
         logger.info("Downloading %s ...", fname)
-        # Kaggle serves competition files individually; each arrives as <file>.zip.
         api.competition_download_file(COMPETITION, fname, path=str(raw_dir), quiet=False)
-        zipped = raw_dir / f"{fname}.zip"
-        if zipped.exists():
-            logger.info("Extracting %s ...", zipped.name)
-            with zipfile.ZipFile(zipped) as zf:
-                zf.extractall(raw_dir)
-            zipped.unlink()
-        logger.info("Ready: %s", target)
+        # The API may save it as `<fname>` or wrap it as `<fname>.zip`.
+        got = raw_dir / f"{fname}.zip" if (raw_dir / f"{fname}.zip").exists() else raw_dir / fname
+        logger.info("Extracting %s ...", got.name)
+        _extract(got, raw_dir)
+        # Some archives nest the CSV under an internal path (e.g. data/churn_comp_refresh/)
+        # — flatten it to the raw dir root so build_dataset.py finds it.
+        target = raw_dir / csv_name
+        if not target.exists():
+            nested = next((p for p in raw_dir.rglob(csv_name) if p != target), None)
+            if nested:
+                nested.replace(target)
+        logger.info("Ready: %s", csv_name)
 
 
 def main() -> None:

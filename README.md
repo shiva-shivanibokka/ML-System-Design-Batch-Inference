@@ -15,7 +15,7 @@
 
 - **What it does:** pre-computes churn scores for ~970K real music-streaming subscribers (KKBox dataset) on a schedule, stores every prediction with full lineage, and serves them with sub-lookup latency behind an API + dashboard.
 - **Hardest problem solved:** eliminating **train/serve skew** across three inference engines (LightGBM training, PySpark distributed scoring, and a pandas serverless path) by routing all of them through one shared feature module — and fixing a real Spark model-broadcast bug that silently shipped the model into every task.
-- *(Impact numbers intentionally omitted — the model has not yet been trained on the real data. Metrics will be added once measured, not estimated.)*
+- **Measured on the real data:** LightGBM churn model **AUC-ROC 0.81** (held-out test); the pandas scoring path scores all **970,960 subscribers in ~10s (~95K records/sec)** on a single machine.
 
 ---
 
@@ -210,13 +210,23 @@ Locally, `docker-compose up --build` brings up the full Postgres + Spark + Airfl
 
 ## Impact / Results
 
-No performance or accuracy numbers are claimed yet — the model has not been trained on the real dataset in this environment. The benchmark harness (`bench/compare.py`) measures PySpark vs pandas vs joblib throughput across sample sizes; results will be added here once run, rather than estimated. The **qualitative** win is architectural: replacing on-demand inference with pre-computed, indexed lookups, and guaranteeing consistent predictions across three engines via a single feature module.
+Measured on the real KKBox data (970,960 labelled subscribers, 9% churn base rate):
+
+| Metric | Value |
+|---|---|
+| Model AUC-ROC (held-out test) | **0.812** |
+| Average precision | 0.446 |
+| Recall / precision (class-weighted for churn catch-rate) | 0.73 / 0.22 |
+| Pandas scoring throughput | **970,960 rows in ~10.3s (~95K rec/s)** |
+| Top churn drivers | registration tenure, age, membership tenure, city, days-to-expiry |
+
+Numbers are from a single local run (`models/train.py --eval` → `models/training_report.json`, and `score_batch.py`), reproducible from the steps above. The 3-way engine benchmark (`bench/compare.py`, PySpark vs pandas vs joblib) has not been run at full scale yet — those figures will be added once measured, not estimated. The architectural win: replacing on-demand inference with pre-computed indexed lookups, and guaranteeing identical predictions across three engines via one feature module.
 
 ## Roadmap
 
 Full checklist in **[TODO.md](./TODO.md)**. Highlights:
 
-- [ ] Train on the real KKBox data (local GPU) and publish measured metrics + benchmark numbers here
+- [x] Train on the real KKBox data and publish measured metrics (AUC 0.81) — *3-way benchmark numbers still pending*
 - [ ] First cloud deploy (Neon + Vercel API + Vercel dashboard) and end-to-end verification
 - [ ] Commit the small real sample + model artifacts so the nightly GitHub Actions job runs
 - [ ] Formal test-coverage measurement

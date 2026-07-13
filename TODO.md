@@ -11,14 +11,16 @@ Legend: ⬜ not started · 🧪 needs your testing (I couldn't run it here)
 
 ## A. Get it running locally (needs Kaggle + your GPU)
 
-- ⬜ **Kaggle token** — accept the [competition rules](https://www.kaggle.com/c/kkbox-churn-prediction-challenge/rules), create an API token, save `~/.kaggle/kaggle.json`.
-- ⬜ **Download data**: `python data/download_kkbox.py`
-- 🧪 **Build the full dataset**: `python data/build_dataset.py` → `data/customers.parquet` (~970K rows). *I could not run the ETL without the data — verify `aggregate_transactions` output on the real files (dtypes, null handling on members with no transactions).*
+- ✅ **Kaggle rules accepted** (via browser) + token works.
+- ✅ **Download data**: `python data/download_kkbox.py` — fetches + extracts the `.7z` files (needs `py7zr`).
+- ✅ **Build the full dataset**: `python data/build_dataset.py` → `data/customers.parquet` (**970,960 rows, 9% churn, 48 MB**). ETL verified on the real files.
+- ✅ **Train**: `python models/train.py --eval` → **AUC-ROC 0.812**, artifacts in `models/`.
+- ✅ **End-to-end scoring proven**: `python score_batch.py --skip-postgres` scored all 970,960 rows in ~10s, validation gates passed.
 - ⬜ **Build the committed sample** (small real slice the nightly CI scores):
   `python data/build_dataset.py --limit 20000 --output data/sample/customers.parquet` then `git add data/sample/customers.parquet`
-- ⬜ **Train on your GPU**: `python models/train.py --eval`, then commit the artifacts (they're git-ignored by default):
+- ⬜ **Commit model artifacts** for nightly CI (git-ignored by default):
   `git add -f models/churn_model.pkl models/label_encoders.pkl models/feature_columns.pkl`
-- 🧪 **Local full stack**: copy `.env.example` → `.env`, then `docker-compose up --build`. Verify the Airflow DAG runs end-to-end on the real parquet and the Spark broadcast path works.
+- 🧪 **Local full stack**: copy `.env.example` → `.env`, then `docker-compose up --build`. Verify the Airflow DAG + Spark broadcast path on the real parquet. *(Not yet run — the pandas path above is proven; Spark/Airflow still to test.)*
 - 🧪 **Local API + dashboard**: `uvicorn serving.app:app --port 8000`, then in `dashboard/`: `npm install`, `npm run dev` (commit the generated `package-lock.json`).
 
 ## B. Deploy (all free tiers)
